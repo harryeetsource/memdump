@@ -16,7 +16,7 @@ int main() {
         return 1;
     }
     DWORD numProcesses = cbNeeded / sizeof(DWORD);
-    const std::string dumpPath = "C:\\memdumps\\";
+    
     // Loop through all active processes
     for (DWORD i = 0; i < numProcesses; i++) {
         // Ignore this process

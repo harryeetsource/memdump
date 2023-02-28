@@ -4,6 +4,8 @@
 #include <vector>
 #include <set>
 #include <dbghelp.h>
+#include <Shlwapi.h>
+#pragma comment(lib, "Shlwapi.lib")
 std::set<DWORD> dumpedPids;
 
 int main() {
@@ -43,7 +45,7 @@ int main() {
             CloseHandle(hProcess);
             continue;
         }
-
+        PathStripPath(processName);
         // Dump the memory of the process
         std::string dumpFilePath = std::string(processName) + "_" + std::to_string(processIds[i]) + ".dmp";
         HANDLE hFile = CreateFile(dumpFilePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);

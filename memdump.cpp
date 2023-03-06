@@ -18,6 +18,7 @@ std::queue<DWORD> dumpQueue;
 std::mutex g_mutex;
 std::condition_variable g_cv;
 int numThreads = std::thread::hardware_concurrency();
+int numFinishedThreads = 0;
 
 void dumpMemory(DWORD processId) {
     // Open a handle to the process
@@ -79,68 +80,72 @@ void worker_thread() {
             g_cv.wait(lock, []{ return !dumpQueue.empty() || dumpedPids.size() >= 1024; });
             if (dumpQueue.empty() && dumpedPids.size() >= 1024) {
                 // Stop processing new tasks if we've dumped the memory of all processes
-                return;
-        }
-        // Get the next process ID from the queue
-        processId = dumpQueue.front();
-        dumpQueue.pop();
-    }
-    dumpMemory(processId);
+                numFinishedThreads++;
+                if (numFinishedThreads == numThreads) {
+std::cout << "Memory of all processes dumped, exiting program..." << std::endl;
+return;
+}
+continue;
+}
+// Get the next process ID from the queue
+processId = dumpQueue.front();
+dumpQueue.pop();
+}
+dumpMemory(processId);
 }
 }
 
 int main() {
-    // Get the list of process IDs
-    std::vector<DWORD> processIds(1024);
-    DWORD bytesReturned;
-    while (true) {
-        if (EnumProcesses(processIds.data(), processIds.size() * sizeof(DWORD), &bytesReturned) == FALSE) {
-            std::cerr << "Error: could not enumerate processes" << std::endl;
-            return 1;
-        }
-        if (bytesReturned < processIds.size() * sizeof(DWORD)) {
-            processIds.resize(bytesReturned / sizeof(DWORD));
-            break;
-        }
-        processIds.resize(processIds.size() * 2);
+// Get the list of process IDs
+std::vector<DWORD> processIds(1024);
+DWORD bytesReturned;
+while (true) {
+if (EnumProcesses(processIds.data(), processIds.size() * sizeof(DWORD), &bytesReturned) == FALSE) {
+std::cerr << "Error: could not enumerate processes" << std::endl;
+return 1;
+}
+if (bytesReturned < processIds.size() * sizeof(DWORD)) {
+processIds.resize(bytesReturned / sizeof(DWORD));
+break;
+}
+processIds.resize(processIds.size() * 2);
+}
+// Remove the system processes from the list
+processIds.erase(std::remove_if(processIds.begin(), processIds.end(), [](DWORD processId) {
+    // Open a handle to the process
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
+    if (hProcess == NULL) {
+        return true;
     }
 
-    // Remove the system processes from the list
-    processIds.erase(std::remove_if(processIds.begin(), processIds.end(), [](DWORD processId) {
-        // Open a handle to the process
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
-        if (hProcess == NULL) {
-            return true;
-        }
-
-        // Get the name of the process
-        TCHAR processName[MAX_PATH];
-        if (GetModuleFileNameEx(hProcess, NULL, processName, MAX_PATH) == 0) {
-            CloseHandle(hProcess);
-            return true;
-        }
+    // Get the name of the process
+    TCHAR processName[MAX_PATH];
+    if (GetModuleFileNameEx(hProcess, NULL, processName, MAX_PATH) == 0) {
         CloseHandle(hProcess);
-
-        // Check if the process is a system process
-        return PathIsSystemFolderA(processName, FILE_ATTRIBUTE_DIRECTORY) != FALSE;
-
-    }), processIds.end());
-
-    // Dump the memory of the non-system processes
-    for (DWORD processId : processIds) {
-        dumpQueue.push(processId);
+        return true;
     }
+    CloseHandle(hProcess);
 
-    // Create and start the worker threads
-    std::vector<std::thread> workerThreads;
-    for (int i = 0; i < numThreads; i++) {
-        workerThreads.emplace_back(worker_thread);
-    }
+    // Check if the process is a system process
+    return PathIsSystemFolderA(processName, FILE_ATTRIBUTE_DIRECTORY) != FALSE;
 
-    // Wait for the worker threads to finish
-    for (std::thread& thread : workerThreads) {
-        thread.join();
-    }
+}), processIds.end());
 
-    return 0;
+// Dump the memory of the non-system processes
+for (DWORD processId : processIds) {
+    dumpQueue.push(processId);
+}
+
+// Create and start the worker threads
+std::vector<std::thread> workerThreads;
+for (int i = 0; i < numThreads; i++) {
+    workerThreads.emplace_back(worker_thread);
+}
+
+// Wait for the worker threads to finish
+for (std::thread& thread : workerThreads) {
+    thread.join();
+}
+
+return 0;
 }

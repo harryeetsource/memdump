@@ -1,1 +1,1 @@
-gcc.exe -std=c++17 .\memdump.cpp -o memdump.exe -lstdc++ -static-libgcc -static-libstdc++ -static -lpsapi -ldbghelp
+gcc.exe -std=c++17 .\memdump.cpp -o memdump.exe -lstdc++ -static-libgcc -static-libstdc++ -static -lpsapi -ldbghelp -lshlwapi

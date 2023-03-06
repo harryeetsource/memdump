@@ -17,7 +17,7 @@ std::queue<DWORD> dumpQueue;
 
 std::mutex g_mutex;
 std::condition_variable g_cv;
-int numThreads = 2;
+int numThreads = std::thread::hardware_concurrency();
 
 void dumpMemory(DWORD processId) {
     // Open a handle to the process

@@ -19,6 +19,7 @@ std::mutex g_mutex;
 std::condition_variable g_cv;
 int numThreads = std::thread::hardware_concurrency();
 int numFinishedThreads = 0;
+bool allProcessesDumped = false;
 
 void dumpMemory(DWORD processId) {
     // Open a handle to the process
@@ -43,7 +44,7 @@ void dumpMemory(DWORD processId) {
         return;
     }
     PathStripPath(processName);
-    std::this_thread::sleep_for(std::chrono::seconds(3));
+
     // Dump the memory of the process
     std::string dumpFilePath = std::string(processName) + "_" + std::to_string(processId) + ".dmp";
     HANDLE hFile = CreateFile(dumpFilePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
@@ -52,6 +53,11 @@ void dumpMemory(DWORD processId) {
         CloseHandle(hProcess);
         return;
     }
+
+    // Set a timeout for the memory dump operation
+    const DWORD dumpTimeout = 60000; // 60 seconds
+    DWORD dumpStart = GetTickCount();
+
     if (MiniDumpWriteDump(hProcess, processId, hFile, MiniDumpWithFullMemory, NULL, NULL, NULL) == FALSE) {
         std::cerr << "Error: could not dump memory for process " << processId << std::endl;
         CloseHandle(hProcess);
@@ -71,16 +77,23 @@ void dumpMemory(DWORD processId) {
     g_cv.notify_one();
 }
 
+
 void worker_thread() {
     while (true) {
         DWORD processId;
         {
             std::unique_lock<std::mutex> lock(g_mutex);
             // Wait for a signal that there is work to be done or that all work is complete
-            g_cv.wait(lock, []{ return !dumpQueue.empty() || numFinishedThreads == numThreads; });
-            if (dumpQueue.empty() && numFinishedThreads == numThreads) {
-                // Exit program if we've dumped the memory of all non-system and non-own processes
-                return;
+            g_cv.wait(lock, []{ return !dumpQueue.empty() || allProcessesDumped; });
+            if (dumpQueue.empty() && allProcessesDumped) {
+                // Stop processing new tasks if we've dumped the memory of all processes
+                numFinishedThreads++;
+                if (numFinishedThreads == numThreads) {
+                    std::cout << "Memory of all processes dumped, exiting program..." << std::endl;
+                    g_cv.notify_all(); // Notify any other threads waiting on g_cv
+                    return;
+                }
+                continue;
             }
             // Get the next process ID from the queue
             processId = dumpQueue.front();
@@ -92,51 +105,50 @@ void worker_thread() {
 
 
 int main() {
-    // Get the list of process IDs
-    std::vector<DWORD> processIds(1024);
-    DWORD bytesReturned;
-    while (true) {
-        if (EnumProcesses(processIds.data(), processIds.size() * sizeof(DWORD), &bytesReturned) == FALSE) {
-            std::cerr << "Error: could not enumerate processes" << std::endl;
-            return 1;
-        }
-        if (bytesReturned < processIds.size() * sizeof(DWORD)) {
-            processIds.resize(bytesReturned / sizeof(DWORD));
-            break;
-        }
-        processIds.resize(processIds.size() * 2);
+// Get the list of process IDs
+std::vector<DWORD> processIds(1024);
+DWORD bytesReturned;
+while (true) {
+if (EnumProcesses(processIds.data(), processIds.size() * sizeof(DWORD), &bytesReturned) == FALSE) {
+std::cerr << "Error: could not enumerate processes" << std::endl;
+return 1;
+}
+if (bytesReturned < processIds.size() * sizeof(DWORD)) {
+processIds.resize(bytesReturned / sizeof(DWORD));
+break;
+}
+processIds.resize(processIds.size() * 2);
+}
+// Get the program's own process ID
+DWORD ownProcessId = GetCurrentProcessId();
+
+// Remove the system and own processes from the list
+processIds.erase(std::remove_if(processIds.begin(), processIds.end(), [ownProcessId](DWORD processId) {
+    // Open a handle to the process
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
+    if (hProcess == NULL) {
+        return true;
     }
 
-    // Get the program's own process ID
-    DWORD ownProcessId = GetCurrentProcessId();
-
-    // Remove the system and own processes from the list
-    processIds.erase(std::remove_if(processIds.begin(), processIds.end(), [ownProcessId](DWORD processId) {
-        // Open a handle to the process
-        HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, processId);
-        if (hProcess == NULL) {
-            return true;
-        }
-
-        // Get the name of the process
-        TCHAR processName[MAX_PATH];
-        if (GetModuleFileNameEx(hProcess, NULL, processName, MAX_PATH) == 0) {
-            CloseHandle(hProcess);
-            return true;
-        }
+    // Get the name of the process
+    TCHAR processName[MAX_PATH];
+    if (GetModuleFileNameEx(hProcess, NULL, processName, MAX_PATH) == 0) {
         CloseHandle(hProcess);
-
-        // Check if the process is a system process or the own process
-        return processId == ownProcessId || PathIsSystemFolderA(processName, FILE_ATTRIBUTE_DIRECTORY) != FALSE;
-
-    }), processIds.end());
-
-    // Dump the memory of the non-system and non-own processes
-    for (DWORD processId : processIds) {
-        dumpQueue.push(processId);
+        return true;
     }
+    CloseHandle(hProcess);
 
-    // Create and start the worker threads
+    // Check if the process is a system process or the own process
+    return processId == ownProcessId || PathIsSystemFolderA(processName, FILE_ATTRIBUTE_DIRECTORY) != FALSE;
+
+}), processIds.end());
+
+// Dump the memory of the non-system and non-own processes
+for (DWORD processId : processIds) {
+    dumpQueue.push(processId);
+}
+
+// Create and start the worker threads
 std::vector<std::thread> workerThreads;
 for (int i = 0; i < numThreads; i++) {
     workerThreads.emplace_back(worker_thread);
@@ -145,11 +157,9 @@ for (int i = 0; i < numThreads; i++) {
 // Wait for the worker threads to finish
 for (std::thread& thread : workerThreads) {
     thread.join();
-    numFinishedThreads++;
 }
 
-std::cout << "Memory of all non-system and non-own processes dumped, exiting program..." << std::endl;
-
+// Print a message when all processes have been dumped
+std::cout << "Memory of all non-system processes dumped, exiting program..." << std::endl;
 return 0;
 }
-

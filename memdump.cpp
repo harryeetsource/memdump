@@ -53,11 +53,6 @@ void dumpMemory(DWORD processId) {
         CloseHandle(hProcess);
         return;
     }
-
-    // Set a timeout for the memory dump operation
-    const DWORD dumpTimeout = 60000; // 60 seconds
-    DWORD dumpStart = GetTickCount();
-
     if (MiniDumpWriteDump(hProcess, processId, hFile, MiniDumpWithFullMemory, NULL, NULL, NULL) == FALSE) {
         std::cerr << "Error: could not dump memory for process " << processId << std::endl;
         CloseHandle(hProcess);
@@ -77,7 +72,6 @@ void dumpMemory(DWORD processId) {
     g_cv.notify_one();
 }
 
-
 void worker_thread() {
     while (true) {
         DWORD processId;
@@ -87,25 +81,24 @@ void worker_thread() {
             g_cv.wait(lock, []{ return !dumpQueue.empty() || allProcessesDumped; });
             if (dumpQueue.empty() && allProcessesDumped) {
                 // Stop processing new tasks if we've dumped the memory of all processes
-                numFinishedThreads++;
-                std::cout << "Worker thread " << std::this_thread::get_id() << " finished, " << numFinishedThreads << " of " << numThreads << " threads done." << std::endl;
-                if (numFinishedThreads == numThreads) {
-                    std::cout << "Memory of all processes dumped, exiting program..." << std::endl;
-                    return;
-                }
-                continue;
-            }
-            // Get the next process ID from the queue
-            processId = dumpQueue.front();
-            dumpQueue.pop();
-        }
-        std::cout << "Worker thread " << std::this_thread::get_id() << " processing process " << processId << std::endl;
-        dumpMemory(processId);
-    }
+numFinishedThreads++;
+std::cout << "Worker thread " << std::this_thread::get_id() << " finished, " << numFinishedThreads << " of " << numThreads << " threads done." << std::endl;
+if (numFinishedThreads == numThreads) {
+allProcessesDumped = true;
+std::cout << "Memory of all processes dumped, exiting program..." << std::endl;
+g_cv.notify_all();
+return;
 }
-
-
-
+continue;
+}
+// Get the next process ID from the queue
+processId = dumpQueue.front();
+dumpQueue.pop();
+}
+std::cout << "Worker thread " << std::this_thread::get_id() << " processing process " << processId << std::endl;
+dumpMemory(processId);
+}
+}
 
 int main() {
 // Get the list of process IDs
@@ -124,7 +117,6 @@ processIds.resize(processIds.size() * 2);
 }
 // Get the program's own process ID
 DWORD ownProcessId = GetCurrentProcessId();
-
 // Remove the system and own processes from the list
 processIds.erase(std::remove_if(processIds.begin(), processIds.end(), [ownProcessId](DWORD processId) {
     // Open a handle to the process
@@ -158,8 +150,9 @@ for (int i = 0; i < numThreads; i++) {
 }
 
 // Wait for the worker threads to finish
-for (std::thread& thread : workerThreads) {
-    thread.join();
+{
+    std::unique_lock<std::mutex> lock(g_mutex);
+    g_cv.wait(lock, []{ return allProcessesDumped; });
 }
 
 // Print a message when all processes have been dumped

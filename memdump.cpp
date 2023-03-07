@@ -81,25 +81,26 @@ void worker_thread() {
             g_cv.wait(lock, []{ return !dumpQueue.empty() || allProcessesDumped; });
             if (dumpQueue.empty() && allProcessesDumped) {
                 // Stop processing new tasks if we've dumped the memory of all processes
-numFinishedThreads++;
-std::cout << "Worker thread " << std::this_thread::get_id() << " finished, " << numFinishedThreads << " of " << numThreads << " threads done." << std::endl;
-if (numFinishedThreads == numThreads) {
-allProcessesDumped = true;
-std::cout << "Memory of all processes dumped, exiting program..." << std::endl;
-g_cv.notify_all();
-return;
+                numFinishedThreads++;
+                std::cout << "Worker thread " << std::this_thread::get_id() << " finished, " << numFinishedThreads << " of " << numThreads << " threads done." << std::endl;
+                if (numFinishedThreads == numThreads) {
+                    allProcessesDumped = true;
+                    g_cv.notify_all();
+                    return;
+                }
+                continue;
+            }
+            // Get the next process ID from the queue
+            processId = dumpQueue.front();
+            dumpQueue.pop();
+        }
+        std::cout << "Worker thread " << std::this_thread::get_id() << " processing process " << processId << std::endl;
+        dumpMemory(processId);
+    }
+    // Print a message when all processes have been dumped
+    std::cout << "Memory of all non-system processes dumped, exiting program..." << std::endl;
 }
-continue;
-}
-// Get the next process ID from the queue
-processId = dumpQueue.front();
-dumpQueue.pop();
-}
-std::cout << "Worker thread " << std::this_thread::get_id() << " processing process " << processId << std::endl;
-dumpMemory(processId);
-dumpQueue.pop();
-}
-}
+
 
 int main() {
 // Get the list of process IDs

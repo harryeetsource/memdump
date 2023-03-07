@@ -43,7 +43,7 @@ void dumpMemory(DWORD processId) {
         return;
     }
     PathStripPath(processName);
-    std::this_thread::sleep_for(std::chrono::seconds(5));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
     // Dump the memory of the process
     std::string dumpFilePath = std::string(processName) + "_" + std::to_string(processId) + ".dmp";
     HANDLE hFile = CreateFile(dumpFilePath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);

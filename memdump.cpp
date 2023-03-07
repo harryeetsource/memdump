@@ -97,6 +97,7 @@ dumpQueue.pop();
 }
 std::cout << "Worker thread " << std::this_thread::get_id() << " processing process " << processId << std::endl;
 dumpMemory(processId);
+dumpQueue.pop();
 }
 }
 

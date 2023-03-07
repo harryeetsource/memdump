@@ -88,9 +88,9 @@ void worker_thread() {
             if (dumpQueue.empty() && allProcessesDumped) {
                 // Stop processing new tasks if we've dumped the memory of all processes
                 numFinishedThreads++;
+                std::cout << "Worker thread " << std::this_thread::get_id() << " finished, " << numFinishedThreads << " of " << numThreads << " threads done." << std::endl;
                 if (numFinishedThreads == numThreads) {
                     std::cout << "Memory of all processes dumped, exiting program..." << std::endl;
-                    g_cv.notify_all(); // Notify any other threads waiting on g_cv
                     return;
                 }
                 continue;
@@ -99,9 +99,12 @@ void worker_thread() {
             processId = dumpQueue.front();
             dumpQueue.pop();
         }
+        std::cout << "Worker thread " << std::this_thread::get_id() << " processing process " << processId << std::endl;
         dumpMemory(processId);
     }
 }
+
+
 
 
 int main() {

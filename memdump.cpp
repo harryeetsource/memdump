@@ -95,7 +95,7 @@ void worker_thread() {
             dumpQueue.pop();
         }
         std::cout << "Worker thread " << std::this_thread::get_id() << " processing process " << processId << std::endl;
-        Sleep(3000); // sleep for 5 seconds
+        Sleep(3000); // sleep for 3 seconds
         dumpMemory(processId);
     }
     // Print a message when all processes have been dumped

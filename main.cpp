@@ -174,8 +174,15 @@ int main() {
                         }
                     }
 
+                    // Modify output path to include the custom folder for each process
+                    std::string output_dir_path = output_path + "extracted_" + std::to_string(processIds[i]) + "/";
+                    fs::create_directory(output_dir_path);
+
+                    // Move the memory dump file to the output directory
+                    fs::rename(dumpFilePath, output_path + dumpFilePath);
+
                     // Extract executables from the memory dump
-                    extract_executables(dumpFilePath, output_path);
+                    extract_executables(output_path + dumpFilePath, output_dir_path);
                 }
             }
         }
@@ -189,4 +196,7 @@ int main() {
 
     return 0;
 }
+
+
+
 

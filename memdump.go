@@ -49,6 +49,14 @@ func setMemory(ptr unsafe.Pointer, value byte, size uintptr) {
 	copy((*[1 << 30]byte)(ptr)[:size:size], bytes)
 }
 func main() {
+	logFile, err := os.OpenFile("memory_dumper.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Error creating log file: %v", err)
+	}
+	defer logFile.Close()
+
+	// Redirect log output to the log file
+	log.SetOutput(logFile)
 	snapshot, err := createToolhelp32Snapshot()
 	if err != nil {
 		log.Fatalf("Error creating snapshot: %v", err)
@@ -155,19 +163,13 @@ func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error
 	defer outputFile.Close()
 
 	for baseAddress := uintptr(0); ; {
-		fmt.Printf("Current base address: %X\n", baseAddress)
-
 		baseAddress = (baseAddress + 0xFFFF) & ^uintptr(0xFFFF)
 		var memoryBasicInfo MEMORY_BASIC_INFORMATION
 		setMemory(unsafe.Pointer(&memoryBasicInfo), 0, unsafe.Sizeof(memoryBasicInfo))
 
-		ret, _, err := procVirtualQueryEx.Call(hProcess, baseAddress, uintptr(unsafe.Pointer(&memoryBasicInfo)), unsafe.Sizeof(memoryBasicInfo))
+		ret, _, _ := procVirtualQueryEx.Call(hProcess, baseAddress, uintptr(unsafe.Pointer(&memoryBasicInfo)), unsafe.Sizeof(memoryBasicInfo))
 
 		if ret == 0 {
-			if err != nil && err != syscall.Errno(0) {
-				fmt.Printf("VirtualQueryEx failed: %v\n", err)
-				return fmt.Errorf("VirtualQueryEx failed: %v", err)
-			}
 			break
 		}
 
@@ -177,13 +179,14 @@ func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error
 			ret, _, err = procReadProcessMemory.Call(hProcess, memoryBasicInfo.BaseAddress, uintptr(unsafe.Pointer(&buffer[0])), uintptr(memoryBasicInfo.RegionSize), uintptr(unsafe.Pointer(&bytesRead)))
 			if ret != 0 {
 				outputFile.Write(buffer[:bytesRead])
+				log.Printf("Memory dump for PID %d at base address: %X written\n", processID, baseAddress)
 			}
 		}
 
 		baseAddress += memoryBasicInfo.RegionSize
 	}
 
-	fmt.Printf("Memory dump saved to: %s\n", outputPath)
+	log.Printf("Memory dump saved to: %s\n", outputPath)
 
 	return nil
 }

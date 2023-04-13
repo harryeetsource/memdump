@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 
@@ -146,6 +147,26 @@ type PROCESS_MEMORY_COUNTERS_EX struct {
 	PrivateUsage               uintptr
 }
 
+func protectionFlagsToString(protect uint32) string {
+	flags := make([]string, 0)
+
+	read := protect&windows.PAGE_READONLY != 0 || protect&windows.PAGE_READWRITE != 0 || protect&windows.PAGE_WRITECOPY != 0 || protect&windows.PAGE_EXECUTE_READ != 0 || protect&windows.PAGE_EXECUTE_READWRITE != 0 || protect&windows.PAGE_EXECUTE_WRITECOPY != 0
+	write := protect&windows.PAGE_READWRITE != 0 || protect&windows.PAGE_WRITECOPY != 0 || protect&windows.PAGE_EXECUTE_READWRITE != 0 || protect&windows.PAGE_EXECUTE_WRITECOPY != 0
+	execute := protect&windows.PAGE_EXECUTE != 0 || protect&windows.PAGE_EXECUTE_READ != 0 || protect&windows.PAGE_EXECUTE_READWRITE != 0 || protect&windows.PAGE_EXECUTE_WRITECOPY != 0
+
+	if read {
+		flags = append(flags, "R")
+	}
+	if write {
+		flags = append(flags, "W")
+	}
+	if execute {
+		flags = append(flags, "X")
+	}
+
+	return strings.Join(flags, "")
+}
+
 func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error {
 	exePath := syscall.UTF16ToString(exeFile[:])
 
@@ -161,6 +182,14 @@ func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error
 		return err
 	}
 	defer outputFile.Close()
+
+	type MemoryRange struct {
+		BaseAddress uintptr
+		RegionSize  uintptr
+		Protect     uint32
+	}
+
+	var memoryRanges []MemoryRange
 
 	for baseAddress := uintptr(0); ; {
 		baseAddress = (baseAddress + 0xFFFF) & ^uintptr(0xFFFF)
@@ -179,14 +208,19 @@ func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error
 			ret, _, err = procReadProcessMemory.Call(hProcess, memoryBasicInfo.BaseAddress, uintptr(unsafe.Pointer(&buffer[0])), uintptr(memoryBasicInfo.RegionSize), uintptr(unsafe.Pointer(&bytesRead)))
 			if ret != 0 {
 				outputFile.Write(buffer[:bytesRead])
-				log.Printf("Memory dump for PID %d at base address: %X written\n", processID, baseAddress)
+				memoryRanges = append(memoryRanges, MemoryRange{BaseAddress: baseAddress, RegionSize: memoryBasicInfo.RegionSize, Protect: memoryBasicInfo.Protect})
 			}
 		}
 
 		baseAddress += memoryBasicInfo.RegionSize
 	}
 
-	log.Printf("Memory dump saved to: %s\n", outputPath)
+	log.Printf("Memory dump for PID %d saved to: %s\n", processID, outputPath)
+	log.Printf("Memory ranges for PID %d:\n", processID)
+	for _, memRange := range memoryRanges {
+		protectionStr := protectionFlagsToString(memRange.Protect)
+		log.Printf("Base address: %X, Region size: %X, Protection: %s\n", memRange.BaseAddress, memRange.RegionSize, protectionStr)
+	}
 
 	return nil
 }

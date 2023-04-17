@@ -69,17 +69,24 @@ func main() {
 		log.Fatalf("Error getting process list: %v", err)
 	}
 
+	currentProcessID := syscall.Getpid()
+
 	for _, process := range processes {
 		if process.th32ProcessID == 0 {
 			continue
 		}
+
+		// Skip dumping memory of current process
+		if process.th32ProcessID == uint32(currentProcessID) {
+			continue
+		}
+
 		fmt.Printf("Process: %s (PID: %d)\n", syscall.UTF16ToString(process.szExeFile[:]), process.th32ProcessID)
 
 		if err := dumpProcessMemory(process.th32ProcessID, process.szExeFile); err != nil {
 			fmt.Printf("Failed to dump memory: %v\n", err)
 		}
 	}
-
 }
 
 // ProcessEntry32 is a PROCESSENTRY32 structure.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"strings"
@@ -87,25 +88,11 @@ var (
 	procVirtualQueryEx            = modkernel32.NewProc("VirtualQueryEx")
 )
 
-const (
-	MEM_COMMIT = 0x1000
-)
-
-type MEMORY_BASIC_INFORMATION struct {
-	BaseAddress       uintptr
-	AllocationBase    uintptr
-	AllocationProtect uint32
-	RegionSize        uintptr
-	State             uint32
-	Protect           uint32
-	Type              uint32
-}
-
 func getPEB(processHandle windows.Handle) (*PEB, error) {
 	var processBasicInfo PROCESS_BASIC_INFORMATION
-	err := windows.NtQueryInformationProcess(processHandle, ProcessBasicInformation, unsafe.Pointer(&processBasicInfo), uint32(unsafe.Sizeof(processBasicInfo)), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get PROCESS_BASIC_INFORMATION: %v", err)
+	status, _, _ := procNtQueryInformationProcess.Call(uintptr(processHandle), uintptr(ProcessBasicInformation), uintptr(unsafe.Pointer(&processBasicInfo)), uintptr(unsafe.Sizeof(processBasicInfo)), uintptr(0))
+	if status != 0 {
+		return nil, fmt.Errorf("failed to get PROCESS_BASIC_INFORMATION: %v", syscall.Errno(status))
 	}
 	peb := (*PEB)(unsafe.Pointer(processBasicInfo.PebBaseAddress))
 	return peb, nil
@@ -114,9 +101,10 @@ func getPEB(processHandle windows.Handle) (*PEB, error) {
 func getLdrData(processHandle windows.Handle, peb *PEB) (*PEB_LDR_DATA, error) {
 	var ldrData PEB_LDR_DATA
 	var bytesRead uintptr
-	err := windows.ReadProcessMemory(processHandle, uintptr(unsafe.Pointer(peb.LoaderData)), (*byte)(unsafe.Pointer(&ldrData)), unsafe.Sizeof(ldrData), &bytesRead)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read process memory: %v", err)
+	ret, _, _ := procReadProcessMemory.Call(uintptr(processHandle), uintptr(unsafe.Pointer(peb.LoaderData)), uintptr(unsafe.Pointer(&ldrData)), uintptr(unsafe.Sizeof(ldrData)), uintptr(unsafe.Pointer(&bytesRead)))
+	if ret == 0 {
+		errCode := windows.GetLastError()
+		return nil, fmt.Errorf("failed to read process memory: %v", errCode.Error())
 	}
 
 	return &ldrData, nil
@@ -124,35 +112,58 @@ func getLdrData(processHandle windows.Handle, peb *PEB) (*PEB_LDR_DATA, error) {
 
 func getFirstLdrEntry(processHandle windows.Handle, ldrData *PEB_LDR_DATA) (*LDR_DATA_TABLE_ENTRY, error) {
 	var firstEntry LDR_DATA_TABLE_ENTRY
-	err := windows.ReadProcessMemory(processHandle, uintptr(unsafe.Pointer(ldrData.InLoadOrderModuleList.Flink))-unsafe.Offsetof(LDR_DATA_TABLE_ENTRY{}.InLoadOrderLinks), (*byte)(unsafe.Pointer(&firstEntry)), uintptr(unsafe.Sizeof(firstEntry)), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read process memory: %v", err)
+	const maxRetries = 3
+	retries := 0
+
+	for retries < maxRetries {
+		ret, _, _ := procReadProcessMemory.Call(uintptr(processHandle), uintptr(unsafe.Pointer(ldrData.InLoadOrderModuleList.Flink))-unsafe.Offsetof(LDR_DATA_TABLE_ENTRY{}.InLoadOrderLinks), uintptr(unsafe.Pointer(&firstEntry)), uintptr(unsafe.Sizeof(firstEntry)), uintptr(0))
+		if ret == 0 {
+			errCode := windows.GetLastError()
+			if errCode != nil {
+				if errno, ok := errCode.(windows.Errno); ok && errno == 299 { // ERROR_PARTIAL_COPY
+					retries++
+					continue
+				}
+				return nil, fmt.Errorf("failed to read first LDR_DATA_TABLE_ENTRY: error code %d", int(errCode.(windows.Errno)))
+			}
+		}
+		break
+	}
+
+	if retries >= maxRetries {
+		return nil, fmt.Errorf("failed to read first LDR_DATA_TABLE_ENTRY: maximum retries reached")
 	}
 
 	return &firstEntry, nil
 }
 
+func getModuleName(processHandle windows.Handle, entry *LDR_DATA_TABLE_ENTRY) (string, error) {
+	if entry.FullDllName.Length == 0 {
+		return "", nil
+	}
+	nameBuffer := make([]uint16, entry.FullDllName.Length/2)
+	var bytesRead uintptr
+	ret, _, _ := procReadProcessMemory.Call(uintptr(processHandle), uintptr(unsafe.Pointer(entry.FullDllName.Buffer)), uintptr(unsafe.Pointer(&nameBuffer[0])), uintptr(entry.FullDllName.Length), uintptr(unsafe.Pointer(&bytesRead)))
+
+	if ret == 0 {
+		errCode := windows.GetLastError()
+		return "", fmt.Errorf("failed to read module name: %v", errCode.Error())
+	}
+
+	return string(utf16.Decode(nameBuffer)), nil
+}
+
 func getNextLdrEntry(processHandle windows.Handle, ldrEntry *LDR_DATA_TABLE_ENTRY) (*LDR_DATA_TABLE_ENTRY, error) {
 	var nextEntry LDR_DATA_TABLE_ENTRY
 	var bytesRead uintptr
-	err := windows.ReadProcessMemory(processHandle, uintptr(unsafe.Pointer(ldrEntry.InLoadOrderLinks.Flink)), (*byte)(unsafe.Pointer(&nextEntry)), uintptr(unsafe.Sizeof(nextEntry)), &bytesRead)
+	ret, _, _ := procReadProcessMemory.Call(uintptr(processHandle), uintptr(unsafe.Pointer(ldrEntry.InLoadOrderLinks.Flink)), uintptr(unsafe.Pointer(&nextEntry)), uintptr(unsafe.Sizeof(nextEntry)), uintptr(unsafe.Pointer(&bytesRead)))
 
-	if err != nil || bytesRead < uintptr(unsafe.Sizeof(nextEntry)) {
-		return nil, fmt.Errorf("failed to read process memory: %v", err)
+	if ret == 0 || bytesRead < uintptr(unsafe.Sizeof(nextEntry)) {
+		errCode := windows.GetLastError()
+		return nil, fmt.Errorf("failed to read process memory: %v", errCode)
 	}
 
 	return &nextEntry, nil
-}
-
-func getModuleName(processHandle windows.Handle, entry *LDR_DATA_TABLE_ENTRY) (string, error) {
-	nameBuffer := make([]uint16, entry.FullDllName.Length/2)
-	var bytesRead uintptr
-	err := windows.ReadProcessMemory(processHandle, uintptr(unsafe.Pointer(&entry.FullDllName.Buffer)), (*byte)(unsafe.Pointer(&nameBuffer[0])), uintptr(entry.FullDllName.Length), &bytesRead)
-
-	if err != nil {
-		return "", fmt.Errorf("failed to read module name: %v", err)
-	}
-	return string(utf16.Decode(nameBuffer)), nil
 }
 
 func getModuleBaseAddresses(processHandle windows.Handle) (map[uintptr]string, error) {
@@ -167,9 +178,10 @@ func getModuleBaseAddresses(processHandle windows.Handle) (map[uintptr]string, e
 	}
 
 	var peb PEB
-	err = windows.ReadProcessMemory(processHandle, uintptr(unsafe.Pointer(pebAddress)), (*byte)(unsafe.Pointer(&peb)), unsafe.Sizeof(peb), nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get PROCESS_BASIC_INFORMATION: %v", err)
+	ret, _, _ := procReadProcessMemory.Call(uintptr(processHandle), uintptr(unsafe.Pointer(pebAddress)), uintptr(unsafe.Pointer(&peb)), uintptr(unsafe.Sizeof(peb)), uintptr(0))
+	if ret == 0 {
+		errCode := windows.GetLastError()
+		return nil, fmt.Errorf("failed to read PEB: %v", errCode)
 	}
 
 	ldrData, err := getLdrData(processHandle, &peb)
@@ -177,37 +189,31 @@ func getModuleBaseAddresses(processHandle windows.Handle) (map[uintptr]string, e
 		return nil, fmt.Errorf("failed to read PEB_LDR_DATA: %v", err)
 	}
 
-	ldrEntry := ldrData.InLoadOrderModuleList.Flink
+	firstEntry, err := getFirstLdrEntry(processHandle, ldrData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read first LDR_DATA_TABLE_ENTRY: %v", err)
+	}
+
+	currentEntry := firstEntry
 	for {
-		var entry LDR_DATA_TABLE_ENTRY
-		if ldrEntry == nil || ldrEntry.Flink == nil {
-			break
-		}
-		err = windows.ReadProcessMemory(processHandle, uintptr(unsafe.Pointer(ldrEntry.Flink)), (*byte)(unsafe.Pointer(&entry)), unsafe.Sizeof(entry), nil)
-
-		if err != nil {
-			if errno, ok := err.(syscall.Errno); ok && errno == 299 { // ERROR_PARTIAL_COPY
-				ldrEntry = ldrEntry.Flink
-				continue
-			} else {
-				return nil, fmt.Errorf("failed to read LDR_DATA_TABLE_ENTRY: %v", err)
-			}
-		}
-
-		moduleBase := entry.DllBase
-		moduleName, err := getModuleName(processHandle, &entry)
+		moduleName, err := getModuleName(processHandle, currentEntry)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get module name: %v", err)
 		}
 
+		moduleBase := currentEntry.DllBase
 		moduleMap[moduleBase] = moduleName
 
-		nextEntry := entry.InLoadOrderLinks.Flink
-		if nextEntry == ldrData.InLoadOrderModuleList.Flink {
+		nextEntry, err := getNextLdrEntry(processHandle, currentEntry)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read next LDR_DATA_TABLE_ENTRY: %v", err)
+		}
+
+		if nextEntry.InLoadOrderLinks.Flink == ldrData.InLoadOrderModuleList.Flink {
 			break
 		}
 
-		ldrEntry = nextEntry
+		currentEntry = nextEntry
 	}
 
 	return moduleMap, nil
@@ -244,12 +250,17 @@ func main() {
 		if process.th32ProcessID == 0 {
 			continue
 		}
+		currentProcessID := syscall.Getpid()
+		if process.th32ProcessID == uint32(currentProcessID) {
+			continue
+		}
 		fmt.Printf("Process: %s (PID: %d)\n", syscall.UTF16ToString(process.szExeFile[:]), process.th32ProcessID)
 
-		// Pass the logFile when calling the dumpProcessMemory function
-		if err := dumpProcessMemory(logFile, process.th32ProcessID, process.szExeFile); err != nil {
+		// Pass the log.Writer() when calling the dumpProcessMemory function
+		if err := dumpProcessMemory(log.Writer(), process.th32ProcessID, process.szExeFile); err != nil {
 			fmt.Printf("Failed to dump memory: %v\n", err)
 		}
+
 	}
 }
 
@@ -338,68 +349,66 @@ func protectionFlagsToString(protect uint32) string {
 	return strings.Join(flags, "")
 }
 
-func dumpProcessMemory(logFile *os.File, processID uint32, exeFile [syscall.MAX_PATH]uint16) error {
-	exePath := syscall.UTF16ToString(exeFile[:])
+func processNameToString(name [260]uint16) string {
+	return syscall.UTF16ToString(name[:])
+}
 
-	hProcess, err := windows.OpenProcess(PROCESS_ALL_ACCESS, false, uint32(processID))
+const (
+	PROCESS_VM_READ = 0x0010
+	MEM_COMMIT      = 0x1000
+)
+
+type MEMORY_BASIC_INFORMATION struct {
+	BaseAddress       uintptr
+	AllocationBase    uintptr
+	AllocationProtect uint32
+	RegionSize        uintptr
+	State             uint32
+	Protect           uint32
+	Type              uint32
+}
+
+func dumpProcessMemory(logFile io.Writer, processID uint32, processName [260]uint16) error {
+	processHandle, err := windows.OpenProcess(syscall.PROCESS_QUERY_INFORMATION|PROCESS_VM_READ, false, processID)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open process: %w", err)
 	}
-	defer windows.CloseHandle(hProcess)
+	defer windows.CloseHandle(processHandle)
 
-	moduleMap, err := getModuleBaseAddresses(hProcess)
-	if err != nil {
-		return fmt.Errorf("Failed to get module base addresses: %v", err)
-	}
+	var memoryBasicInfo MEMORY_BASIC_INFORMATION
+	var bytesRead uintptr
+	var baseAddress uintptr
 
-	for baseAddress := uintptr(0); ; {
-		baseAddress = (baseAddress + 0xFFFF) & ^uintptr(0xFFFF)
-		var memoryBasicInfo MEMORY_BASIC_INFORMATION
-		setMemory(unsafe.Pointer(&memoryBasicInfo), 0, unsafe.Sizeof(memoryBasicInfo))
-
-		ret, _, _ := procVirtualQueryEx.Call(uintptr(hProcess), baseAddress, uintptr(unsafe.Pointer(&memoryBasicInfo)), unsafe.Sizeof(memoryBasicInfo))
+	for {
+		ret, _, _ := procVirtualQueryEx.Call(uintptr(processHandle), baseAddress, uintptr(unsafe.Pointer(&memoryBasicInfo)), unsafe.Sizeof(memoryBasicInfo))
 
 		if ret == 0 {
 			break
 		}
 
 		if memoryBasicInfo.State == MEM_COMMIT {
-			var moduleName string
-			for moduleBase, name := range moduleMap {
-				if memoryBasicInfo.BaseAddress >= moduleBase && memoryBasicInfo.BaseAddress < moduleBase+uintptr(memoryBasicInfo.RegionSize) {
-					moduleName = name
-					break
-				}
-			}
-
-			protectionString := protectionFlagsToString(memoryBasicInfo.Protect)
-
-			if err != nil {
-				return err
-			}
-
-			if moduleName == "" {
-				fmt.Fprintf(logFile, "%s - PID %d - 0x%X - 0x%X - %s\n", exePath, processID, memoryBasicInfo.BaseAddress, memoryBasicInfo.RegionSize, protectionString)
-			} else {
-				moduleBase := uintptr(0)
-				for base, name := range moduleMap {
-					if name == moduleName {
-						moduleBase = base
-						break
-					}
-				}
-				fmt.Fprintf(logFile, "%s - PID %d - %s+0x%X - 0x%X - %s\n", exePath, processID, moduleName, memoryBasicInfo.BaseAddress-moduleBase, memoryBasicInfo.RegionSize, protectionString)
-			}
-
 			buffer := make([]byte, memoryBasicInfo.RegionSize)
-			var bytesRead uintptr
-			ret, _, _ = procReadProcessMemory.Call(uintptr(hProcess), memoryBasicInfo.BaseAddress, uintptr(unsafe.Pointer(&buffer[0])), uintptr(memoryBasicInfo.RegionSize), uintptr(unsafe.Pointer(&bytesRead)))
-			if ret == 0 {
-				return fmt.Errorf("Failed to read process memory: %v", err)
+
+			ret, _, err = procReadProcessMemory.Call(uintptr(processHandle), memoryBasicInfo.BaseAddress, uintptr(unsafe.Pointer(&buffer[0])), memoryBasicInfo.RegionSize, uintptr(unsafe.Pointer(&bytesRead)))
+
+			if ret != 0 {
+				outputFilePath := fmt.Sprintf("%s_%x.bin", processNameToString(processName), memoryBasicInfo.BaseAddress)
+				outputFile, err := os.Create(outputFilePath)
+				if err != nil {
+					return fmt.Errorf("failed to create output file: %w", err)
+				}
+
+				_, err = outputFile.Write(buffer[:bytesRead])
+				if err != nil {
+					outputFile.Close()
+					return fmt.Errorf("failed to write memory to file: %w", err)
+				}
+
+				outputFile.Close()
 			}
 		}
 
-		baseAddress += memoryBasicInfo.RegionSize
+		baseAddress = uintptr(memoryBasicInfo.BaseAddress) + uintptr(memoryBasicInfo.RegionSize)
 	}
 
 	return nil

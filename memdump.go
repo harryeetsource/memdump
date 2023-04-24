@@ -12,25 +12,60 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+type LIST_ENTRY struct {
+	Flink uintptr
+	Blink uintptr
+}
+
+type RTL_BALANCED_NODE struct {
+	Children    [2]uintptr
+	Red         uintptr
+	Balance     uintptr
+	ParentValue uintptr
+}
+
 const (
 	PROCESS_ALL_ACCESS = 0x1F0FFF
 )
 
 var (
-	modkernel32                  = windows.NewLazySystemDLL("kernel32.dll")
-	modpsapi                     = windows.NewLazySystemDLL("psapi.dll")
-	procCreateToolhelp32Snapshot = modkernel32.NewProc("CreateToolhelp32Snapshot")
-	procProcess32First           = modkernel32.NewProc("Process32FirstW")
-	procProcess32Next            = modkernel32.NewProc("Process32NextW")
-	procOpenProcess              = modkernel32.NewProc("OpenProcess")
-	procReadProcessMemory        = modkernel32.NewProc("ReadProcessMemory")
-	procGetProcessMemoryInfo     = modpsapi.NewProc("GetProcessMemoryInfo")
-	procVirtualQueryEx           = modkernel32.NewProc("VirtualQueryEx")
+	modkernel32                   = windows.NewLazySystemDLL("kernel32.dll")
+	modntdll                      = windows.NewLazySystemDLL("ntdll.dll")
+	modpsapi                      = windows.NewLazySystemDLL("psapi.dll")
+	procCreateToolhelp32Snapshot  = modkernel32.NewProc("CreateToolhelp32Snapshot")
+	procProcess32First            = modkernel32.NewProc("Process32FirstW")
+	procProcess32Next             = modkernel32.NewProc("Process32NextW")
+	procOpenProcess               = modkernel32.NewProc("OpenProcess")
+	procReadProcessMemory         = modkernel32.NewProc("ReadProcessMemory")
+	procGetProcessMemoryInfo      = modpsapi.NewProc("GetProcessMemoryInfo")
+	procVirtualQueryEx            = modkernel32.NewProc("VirtualQueryEx")
+	procNtQueryInformationProcess = modntdll.NewProc("NtQueryInformationProcess")
 )
 
 const (
 	MEM_COMMIT = 0x1000
 )
+
+type PEB_LDR_DATA struct {
+	Length                          uint32
+	Initialized                     uint8
+	SsHandle                        uintptr
+	InLoadOrderModuleList           LIST_ENTRY
+	InMemoryOrderModuleList         LIST_ENTRY
+	InInitializationOrderModuleList LIST_ENTRY
+	EntryInProgress                 uintptr
+	ShutdownInProgress              uint8
+	ShutdownThreadId                uintptr
+}
+
+func readUnicodeString(hProcess uintptr, str UNICODE_STRING) string {
+	buffer := make([]uint16, str.Length)
+	ret, _, _ := procReadProcessMemory.Call(hProcess, uintptr(str.Buffer), uintptr(unsafe.Pointer(&buffer[0])), uintptr(len(buffer)*2), 0)
+	if ret == 0 {
+		return ""
+	}
+	return syscall.UTF16ToString(buffer)
+}
 
 type MEMORY_BASIC_INFORMATION struct {
 	BaseAddress       uintptr
@@ -42,6 +77,98 @@ type MEMORY_BASIC_INFORMATION struct {
 	Type              uint32
 }
 
+type PROCESS_BASIC_INFORMATION struct {
+	Reserved1       uintptr
+	PebBaseAddress  uintptr
+	Reserved2       [2]uintptr
+	UniqueProcessId uintptr
+	Reserved3       uintptr
+}
+
+type UNICODE_STRING struct {
+	Length        uint16
+	MaximumLength uint16
+	Buffer        uintptr
+}
+type PEB struct {
+	InheritedAddressSpace    byte
+	ReadImageFileExecOptions byte
+	BeingDebugged            byte
+	BitField                 byte
+	Mutant                   uintptr
+	ImageBaseAddress         uintptr
+	Ldr                      *PEB_LDR_DATA
+	ProcessParameters        uintptr
+	SubSystemData            uintptr
+	ProcessHeap              uintptr
+	FastPebLock              uintptr
+	AtlThunkSListPtr         uintptr
+	IFEOKey                  uintptr
+	CrossProcessFlags        uintptr
+	UserSharedInfoPtr        uintptr
+	SystemReserved           uint32
+	AtlThunkSListPtr32       uint32
+	ApiSetMap                uintptr
+}
+
+type LDR_DATA_TABLE_ENTRY struct {
+	InLoadOrderLinks             LIST_ENTRY
+	InMemoryOrderLinks           LIST_ENTRY
+	InInitializationOrderLinks   LIST_ENTRY
+	DllBase                      uintptr
+	EntryPoint                   uintptr
+	SizeOfImage                  uint32
+	FullDllName                  UNICODE_STRING
+	BaseDllName                  UNICODE_STRING
+	Flags                        uint32
+	LoadCount                    uint16
+	TlsIndex                     uint16
+	HashLinks                    LIST_ENTRY
+	SectionPointer               uintptr
+	CheckSum                     uint32
+	TimeDateStamp                uint32
+	EntryPointActivationContext  uintptr
+	PatchInformation             uintptr
+	ForwarderLinks               LIST_ENTRY
+	ServiceTagLinks              LIST_ENTRY
+	StaticLinks                  LIST_ENTRY
+	ContextInformation           uintptr
+	OriginalBase                 uint32
+	LoadTimeOrderLinks           LIST_ENTRY
+	BaseAddressIndexNode         RTL_BALANCED_NODE
+	MappingInfoIndexNode         RTL_BALANCED_NODE
+	OriginalBaseIndexNode        RTL_BALANCED_NODE
+	LoadTimeOrderIndexNode       RTL_BALANCED_NODE
+	PreorderLibraryPathIndexNode RTL_BALANCED_NODE
+	DirectedLinkingTimeStamp     uint64
+	GlobalLock                   uintptr
+	LoadOwner                    uintptr
+	LoadReason                   uint32
+	QuotaPagedPoolUsage          uint32
+	QuotaNonPagedPoolUsage       uint32
+	PagefileUsage                uint32
+	PeakPagefileUsage            uint32
+	PerProcessSystemDll          uintptr
+	PerProcessDebugging          uint32
+	PerProcessDebugFlags         uint32
+	CreatorProcess               uintptr
+	CreatorBackTraceIndex        uint32
+	LoaderPrivateData            uintptr
+	Reserved3                    [1]uintptr
+	FreeTebHint                  uintptr
+	Reserved4                    uint32
+	Reserved5                    uintptr
+	Win32ClientInfo              [62]uintptr
+	LoaderThreads                uint32
+	AlternativeLoadFlags         uint32
+	LoaderPrivateFlags           uint32
+	LastRITInitError             uint32
+	LoadInProgress               uintptr
+	LoaderEntry                  uintptr
+	Reserved6                    uintptr
+	PendingBindings              uintptr
+}
+
 func setMemory(ptr unsafe.Pointer, value byte, size uintptr) {
 	bytes := make([]byte, size)
 	for i := range bytes {
@@ -49,6 +176,7 @@ func setMemory(ptr unsafe.Pointer, value byte, size uintptr) {
 	}
 	copy((*[1 << 30]byte)(ptr)[:size:size], bytes)
 }
+
 func main() {
 	logFile, err := os.OpenFile("memory_dumper.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -173,7 +301,6 @@ func protectionFlagsToString(protect uint32) string {
 
 	return strings.Join(flags, "")
 }
-
 func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error {
 	exePath := syscall.UTF16ToString(exeFile[:])
 
@@ -190,6 +317,52 @@ func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error
 	}
 	defer outputFile.Close()
 
+	var bytesRead uintptr
+
+	// Get the PEB address
+	var processBasicInfo PROCESS_BASIC_INFORMATION
+	ret, _, err := procNtQueryInformationProcess.Call(hProcess, 0, uintptr(unsafe.Pointer(&processBasicInfo)), unsafe.Sizeof(processBasicInfo), 0)
+	if ret != 0 {
+		pebAddress := processBasicInfo.PebBaseAddress
+
+		// Read the PEB
+		var peb windows.PEB
+		ret, _, err = procReadProcessMemory.Call(hProcess, pebAddress, uintptr(unsafe.Pointer(&peb)), unsafe.Sizeof(peb), uintptr(unsafe.Pointer(&bytesRead)))
+		if ret == 0 {
+			return fmt.Errorf("Failed to read PEB")
+		}
+
+		var pebCustom PEB
+		ret, _, err = procReadProcessMemory.Call(hProcess, pebAddress, uintptr(unsafe.Pointer(&pebCustom)), unsafe.Sizeof(pebCustom), uintptr(unsafe.Pointer(&bytesRead)))
+		if ret == 0 {
+			return fmt.Errorf("Failed to read custom PEB")
+		}
+
+		ldrData := pebCustom.Ldr
+
+		// Read LDR_DATA_TABLE_ENTRY
+		var ldrEntry LDR_DATA_TABLE_ENTRY
+		ldrEntryAddress := ldrData.InLoadOrderModuleList.Flink
+		for ldrEntryAddress != 0 {
+			ret, _, err = procReadProcessMemory.Call(hProcess, uintptr(ldrEntryAddress), uintptr(unsafe.Pointer(&ldrEntry)), unsafe.Sizeof(ldrEntry), uintptr(unsafe.Pointer(&bytesRead)))
+			if ret == 0 {
+				break
+			}
+
+			baseDllName := readUnicodeString(hProcess, ldrEntry.BaseDllName)
+			fmt.Printf("Module: %s Base address: %X Size: %X\n", baseDllName, ldrEntry.DllBase, ldrEntry.SizeOfImage)
+
+			// Write module to the dump file
+			moduleBuffer := make([]byte, ldrEntry.SizeOfImage)
+			ret, _, err = procReadProcessMemory.Call(hProcess, ldrEntry.DllBase, uintptr(unsafe.Pointer(&moduleBuffer[0])), uintptr(ldrEntry.SizeOfImage), uintptr(unsafe.Pointer(&bytesRead)))
+			if ret != 0 {
+				outputFile.Write(moduleBuffer[:bytesRead])
+			}
+
+			ldrEntryAddress = uintptr(ldrEntry.InLoadOrderLinks.Flink)
+		}
+	}
+
 	type MemoryRange struct {
 		BaseAddress uintptr
 		RegionSize  uintptr
@@ -202,7 +375,6 @@ func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error
 		baseAddress = (baseAddress + 0xFFFF) & ^uintptr(0xFFFF)
 		var memoryBasicInfo MEMORY_BASIC_INFORMATION
 		setMemory(unsafe.Pointer(&memoryBasicInfo), 0, unsafe.Sizeof(memoryBasicInfo))
-
 		ret, _, _ := procVirtualQueryEx.Call(hProcess, baseAddress, uintptr(unsafe.Pointer(&memoryBasicInfo)), unsafe.Sizeof(memoryBasicInfo))
 
 		if ret == 0 {

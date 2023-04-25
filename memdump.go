@@ -13,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"golang.org/x/sys/windows"
 )
@@ -80,9 +81,10 @@ func main() {
 				}
 
 				progressChannel := make(chan float64)
+				statusChannel := make(chan string)
 
 				go func() {
-					output, err := runMemoryDumper(folderName, progressChannel)
+					output, err := runMemoryDumper(folderName, progressChannel, statusChannel)
 					if err != nil {
 						outputLabel.SetText(fmt.Sprintf("Error: %v", err))
 					} else {
@@ -91,20 +93,28 @@ func main() {
 				}()
 
 				go func() {
-					for progressValue := range progressChannel {
-						progress.SetValue(progressValue)
+					for {
+						select {
+						case progressValue := <-progressChannel:
+							progress.SetValue(progressValue)
+						case status := <-statusChannel:
+							// Append the status update to the outputLabel
+							existingText := outputLabel.Text
+							outputLabel.SetText(existingText + status)
+						}
 					}
 				}()
+
 			}
 		}
 
 		dialog.ShowCustomConfirm("Create Folder", "Create", "Cancel", entry, confirm, w)
 	})
 
-	content := container.NewVBox(
+	content := container.New(layout.NewBorderLayout(dumpButton, progress, nil, nil),
 		dumpButton,
-		progress,
 		scrollContainer,
+		progress,
 	)
 
 	w.SetContent(content)
@@ -112,8 +122,9 @@ func main() {
 	w.ShowAndRun()
 }
 
-func runMemoryDumper(folderName string, progressChannel chan float64) (string, error) {
+func runMemoryDumper(folderName string, progressChannel chan float64, statusChannel chan string) (string, error) {
 	defer close(progressChannel)
+	defer close(statusChannel)
 	var output strings.Builder
 
 	logFile, err := os.OpenFile("memory_dumper.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -151,6 +162,9 @@ func runMemoryDumper(folderName string, progressChannel chan float64) (string, e
 		if err := dumpProcessMemory(process.th32ProcessID, process.szExeFile, folderName); err != nil {
 			errMsg := fmt.Sprintf("Failed to dump memory: %v\n", err)
 			output.WriteString(errMsg)
+		} else {
+			status := fmt.Sprintf("Successfully dumped memory for process %s (PID: %d)\n", syscall.UTF16ToString(process.szExeFile[:]), process.th32ProcessID)
+			statusChannel <- status
 		}
 
 		progress := float64(index+1) / float64(len(processes))

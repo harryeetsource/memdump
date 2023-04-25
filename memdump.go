@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 	"golang.org/x/sys/windows"
 )
@@ -58,27 +59,61 @@ func main() {
 	w := a.NewWindow("Memory Dumper")
 
 	outputLabel := widget.NewLabel("")
+	scrollContainer := container.NewScroll(outputLabel)
+
+	progress := widget.NewProgressBar()
+	progress.Resize(fyne.NewSize(400, 10))
 
 	dumpButton := widget.NewButton("Dump Memory", func() {
-		output, err := runMemoryDumper()
-		if err != nil {
-			outputLabel.SetText(fmt.Sprintf("Error: %v", err))
-		} else {
-			outputLabel.SetText(output)
+		entry := widget.NewEntry()
+		entry.SetPlaceHolder("Enter folder name")
+
+		confirm := func(response bool) {
+			if response {
+				folderName := entry.Text
+				if folderName != "" {
+					err := os.MkdirAll(folderName, 0755)
+					if err != nil {
+						outputLabel.SetText(fmt.Sprintf("Error creating folder: %v", err))
+						return
+					}
+				}
+
+				progressChannel := make(chan float64)
+
+				go func() {
+					output, err := runMemoryDumper(folderName, progressChannel)
+					if err != nil {
+						outputLabel.SetText(fmt.Sprintf("Error: %v", err))
+					} else {
+						outputLabel.SetText(output)
+					}
+				}()
+
+				go func() {
+					for progressValue := range progressChannel {
+						progress.SetValue(progressValue)
+					}
+				}()
+			}
 		}
+
+		dialog.ShowCustomConfirm("Create Folder", "Create", "Cancel", entry, confirm, w)
 	})
 
 	content := container.NewVBox(
 		dumpButton,
-		outputLabel,
+		progress,
+		scrollContainer,
 	)
 
 	w.SetContent(content)
-	w.Resize(fyne.NewSize(500, 300))
+	w.Resize(fyne.NewSize(800, 600))
 	w.ShowAndRun()
 }
 
-func runMemoryDumper() (string, error) {
+func runMemoryDumper(folderName string, progressChannel chan float64) (string, error) {
+	defer close(progressChannel)
 	var output strings.Builder
 
 	logFile, err := os.OpenFile("memory_dumper.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -101,7 +136,7 @@ func runMemoryDumper() (string, error) {
 
 	currentProcessID := syscall.Getpid()
 
-	for _, process := range processes {
+	for index, process := range processes {
 		if process.th32ProcessID == 0 {
 			continue
 		}
@@ -113,10 +148,13 @@ func runMemoryDumper() (string, error) {
 		processInfo := fmt.Sprintf("Process: %s (PID: %d)\n", syscall.UTF16ToString(process.szExeFile[:]), process.th32ProcessID)
 		output.WriteString(processInfo)
 
-		if err := dumpProcessMemory(process.th32ProcessID, process.szExeFile); err != nil {
+		if err := dumpProcessMemory(process.th32ProcessID, process.szExeFile, folderName); err != nil {
 			errMsg := fmt.Sprintf("Failed to dump memory: %v\n", err)
 			output.WriteString(errMsg)
 		}
+
+		progress := float64(index+1) / float64(len(processes))
+		progressChannel <- progress
 	}
 
 	return output.String(), nil
@@ -207,7 +245,7 @@ func protectionFlagsToString(protect uint32) string {
 	return strings.Join(flags, "")
 }
 
-func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error {
+func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16, folderName string) error {
 	exePath := syscall.UTF16ToString(exeFile[:])
 
 	hProcess, _, err := procOpenProcess.Call(uintptr(PROCESS_ALL_ACCESS), uintptr(0), uintptr(processID))
@@ -216,7 +254,7 @@ func dumpProcessMemory(processID uint32, exeFile [syscall.MAX_PATH]uint16) error
 	}
 	defer syscall.CloseHandle(syscall.Handle(hProcess))
 
-	outputPath := filepath.Join(".", fmt.Sprintf("%s_%d.dmp", exePath, processID))
+	outputPath := filepath.Join(folderName, fmt.Sprintf("%s_%d.dmp", exePath, processID))
 	outputFile, err := os.Create(outputPath)
 	if err != nil {
 		return err

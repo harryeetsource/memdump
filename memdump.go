@@ -56,6 +56,7 @@ func setMemory(ptr unsafe.Pointer, value byte, size uintptr) {
 	copy((*[1 << 30]byte)(ptr)[:size:size], bytes)
 }
 func main() {
+	os.Setenv("FYNE_RENDER", "software")
 	a := app.New()
 	w := a.NewWindow("Memory Dumper")
 

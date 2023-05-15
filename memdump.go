@@ -13,6 +13,8 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/lxn/walk"
+	. "github.com/lxn/walk/declarative"
 	"golang.org/x/sys/windows"
 )
 
@@ -548,29 +550,51 @@ func runMemoryDumper(folderName string, progressChannel chan float64, statusChan
 
 	return output.String(), nil
 }
-func main() {
+
+var mainWindow *walk.MainWindow
+var progressLabel *walk.Label
+var statusLabel *walk.Label
+var outputTextEdit *walk.TextEdit
+
+func updateProgress(progress float64) {
+	if mainWindow != nil {
+		mainWindow.Synchronize(func() {
+			outputTextEdit.AppendText(fmt.Sprintf("Progress: %.2f%%\r\n", progress*100))
+		})
+	}
+}
+
+func updateStatus(status string) {
+	if mainWindow != nil {
+		mainWindow.Synchronize(func() {
+			outputTextEdit.AppendText(status + "\r\n")
+		})
+	}
+}
+func start(progressChannel chan<- float64, statusChannel chan string) {
+
 	isAdmin, err := isUserAnAdmin()
 	if err != nil {
-		fmt.Println("Error checking if user is an admin:", err)
-		os.Exit(1)
+		statusChannel <- fmt.Sprintf("Error checking if user is an admin: %s", err)
+		return
 	}
 
 	if !isAdmin {
 		// Get the path of the current executable
 		programPath, err := os.Executable()
 		if err != nil {
-			fmt.Println("Error getting the current executable path:", err)
-			os.Exit(1)
+			statusChannel <- fmt.Sprintf("Error getting the current executable path: %s", err)
+			return
 		}
 
 		err = runAsAdmin(programPath)
 		if err != nil {
-			fmt.Println("Error running the program as an administrator:", err)
-			os.Exit(1)
+			statusChannel <- fmt.Sprintf("Error running the program as an administrator: %s", err)
+			return
 		}
 
 		// Exit the current non-admin instance of the program
-		os.Exit(0)
+		return
 	}
 
 	// Create an output folder with the current date
@@ -578,31 +602,86 @@ func main() {
 	folderName := fmt.Sprintf("output_%s", currentDate)
 	err = os.MkdirAll(folderName, 0755)
 	if err != nil {
-		fmt.Println("Error creating output folder:", err)
-		os.Exit(1)
+		statusChannel <- fmt.Sprintf("Error creating output folder: %s", err)
+		return
 	}
 
-	progressChannel := make(chan float64)
-	statusChannel := make(chan string)
+	// Create a buffered progress channel to ensure progress updates are not blocked
+	bufProgressChannel := make(chan float64, 1)
 	go func() {
-		for progress := range progressChannel {
-			fmt.Printf("Progress: %.2f%%\n", progress*100)
-		}
-	}()
-	go func() {
-		for status := range statusChannel {
-			fmt.Println(status)
+		for progress := range bufProgressChannel {
+			progressChannel <- progress
 		}
 	}()
 
-	output, err := runMemoryDumper(folderName, progressChannel, statusChannel)
+	output, err := runMemoryDumper(folderName, bufProgressChannel, statusChannel)
 	if err != nil {
-		fmt.Println("Error running memory dumper:", err)
-		os.Exit(1)
+		statusChannel <- fmt.Sprintf("Error running memory dumper: %s", err)
+		return
 	}
+
+	statusChannel <- "Memory dumper completed"
+	progressChannel <- 1.0 // Send 100% progress
+
+	// Close the buffered progress channel
+	close(bufProgressChannel)
+
+	// Print the final output
 	fmt.Println("Memory dumper output:")
 	fmt.Println(output)
 }
+
+func main() {
+	progressChannel := make(chan float64)
+	statusChannel := make(chan string)
+
+	go func() {
+		for progress := range progressChannel {
+			updateProgress(progress)
+		}
+	}()
+
+	go func() {
+		for status := range statusChannel {
+			updateStatus(status)
+		}
+	}()
+
+	// Create the main window
+	mainWindow = new(walk.MainWindow)
+
+	err := MainWindow{
+		AssignTo: &mainWindow,
+		Title:    "Memdump",
+		Size:     Size{Width: 600, Height: 400},
+		Layout:   VBox{},
+		Children: []Widget{
+			TextEdit{
+				AssignTo: &outputTextEdit,
+				ReadOnly: true,
+				VScroll:  true,
+			},
+			PushButton{
+				Text: "Dump Memory",
+				OnClicked: func() {
+					go start(progressChannel, statusChannel)
+				},
+			},
+		},
+	}.Create()
+
+	if err != nil {
+		fmt.Println("Error creating main window:", err)
+	}
+
+	// Run the main event loop
+	mainWindow.Run()
+
+	// Close the channels
+	close(progressChannel)
+	close(statusChannel)
+}
+
 func isUserAnAdmin() (bool, error) {
 	shell32, err := syscall.LoadDLL("shell32.dll")
 	if err != nil {

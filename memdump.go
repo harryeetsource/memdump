@@ -12,8 +12,9 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-
+	"runtime"
 	"github.com/lxn/walk"
+	"os/exec"
 	. "github.com/lxn/walk/declarative"
 	"golang.org/x/sys/windows"
 )
@@ -630,8 +631,59 @@ func start(progressChannel chan<- float64, statusChannel chan string) {
 	fmt.Println("Memory dumper output:")
 	fmt.Println(output)
 }
+const manifestFileName = "memdump.exe.manifest"
+const manifestContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity version="1.0.0.0" processorArchitecture="*" name="CompanyName.YourApplication" type="win32"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
+`
+func checkAndCreateManifestFile() (bool, error) {
+	_, err := os.Stat(manifestFileName)
+	if os.IsNotExist(err) {
+		err = ioutil.WriteFile(manifestFileName, []byte(manifestContent), 0644)
+		return true, err
+	}
+	return false, err
+}
+	func initialize() {
+		createdManifest, err := checkAndCreateManifestFile()
+	if err != nil {
+		fmt.Println("Error checking or creating manifest file:", err)
+		return
+	}
 
-func main() {
+	if createdManifest {
+		exePath, err := os.Executable()
+		if err != nil {
+			fmt.Println("Error getting executable path:", err)
+			return
+		}
+
+		cmd := exec.Command(exePath)
+		if runtime.GOOS == "windows" {
+			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		}
+
+		err = cmd.Start()
+		if err != nil {
+			fmt.Println("Error relaunching program:", err)
+			return
+		}
+
+		os.Exit(0)
+	}
 	progressChannel := make(chan float64)
 	statusChannel := make(chan string)
 
@@ -650,7 +702,7 @@ func main() {
 	// Create the main window
 	mainWindow = new(walk.MainWindow)
 
-	err := MainWindow{
+	err = MainWindow{
 		AssignTo: &mainWindow,
 		Title:    "Memdump",
 		Size:     Size{Width: 600, Height: 400},
@@ -696,4 +748,7 @@ func isUserAnAdmin() (bool, error) {
 
 	ret, _, _ := isUserAnAdmin.Call()
 	return ret != 0, nil
+}
+func main() {
+	runWithPrivileges(initialize)
 }

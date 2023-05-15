@@ -659,6 +659,21 @@ func checkAndCreateManifestFile() (bool, error) {
 	return false, err
 }
 func initialize() {
+	progressChannel := make(chan float64)
+	statusChannel := make(chan string)
+
+	go func() {
+		for progress := range progressChannel {
+			updateProgress(progress)
+		}
+	}()
+
+	go func() {
+		for status := range statusChannel {
+			updateStatus(status)
+		}
+	}()
+
 	createdManifest, err := checkAndCreateManifestFile()
 	if err != nil {
 		fmt.Println("Error checking or creating manifest file:", err)
@@ -687,23 +702,21 @@ func initialize() {
 		// Exit the current non-admin instance of the program
 		os.Exit(0)
 	}
-	progressChannel := make(chan float64)
-	statusChannel := make(chan string)
 
-	go func() {
-		for progress := range progressChannel {
-			updateProgress(progress)
-		}
-	}()
+	// If running with admin rights and the manifest file is in place,
+	// create a new process with NT privileges to relaunch itself
+	programPath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("Error getting the current executable path: %s\n", err)
+		return
+	}
+	err = createProcessAsNT(programPath)
+	if err != nil {
+		fmt.Printf("Error relaunching the program with NT privileges: %s\n", err)
+		return
+	}
 
-	go func() {
-		for status := range statusChannel {
-			updateStatus(status)
-		}
-	}()
-
-	// Create the main window
-	mainWindow = new(walk.MainWindow)
+	mainWindow := new(walk.MainWindow)
 
 	err = MainWindow{
 		AssignTo: &mainWindow,

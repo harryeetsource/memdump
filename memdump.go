@@ -12,9 +12,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
-	"runtime"
+
 	"github.com/lxn/walk"
-	"os/exec"
 	. "github.com/lxn/walk/declarative"
 	"golang.org/x/sys/windows"
 )
@@ -631,6 +630,7 @@ func start(progressChannel chan<- float64, statusChannel chan string) {
 	fmt.Println("Memory dumper output:")
 	fmt.Println(output)
 }
+
 const manifestFileName = "memdump.exe.manifest"
 const manifestContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
@@ -649,6 +649,7 @@ const manifestContent = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   </trustInfo>
 </assembly>
 `
+
 func checkAndCreateManifestFile() (bool, error) {
 	_, err := os.Stat(manifestFileName)
 	if os.IsNotExist(err) {
@@ -657,32 +658,52 @@ func checkAndCreateManifestFile() (bool, error) {
 	}
 	return false, err
 }
-	func initialize() {
-		createdManifest, err := checkAndCreateManifestFile()
+func initialize() {
+	isAdmin, err := isUserAnAdmin()
+	if err != nil {
+		fmt.Printf("Error checking if user is an admin: %s\n", err)
+		return
+	}
+
+	if !isAdmin {
+		programPath, err := os.Executable()
+		if err != nil {
+			fmt.Printf("Error getting the current executable path: %s\n", err)
+			return
+		}
+
+		err = runAsAdmin(programPath)
+		if err != nil {
+			fmt.Printf("Error running the program as an administrator: %s\n", err)
+			return
+		}
+
+		// Exit the current non-admin instance of the program
+		os.Exit(0)
+	}
+
+	createdManifest, err := checkAndCreateManifestFile()
 	if err != nil {
 		fmt.Println("Error checking or creating manifest file:", err)
 		return
 	}
 
 	if createdManifest {
-		exePath, err := os.Executable()
-		if err != nil {
-			fmt.Println("Error getting executable path:", err)
-			return
-		}
+		runWithPrivileges(func() {
+			exePath, err := os.Executable()
+			if err != nil {
+				fmt.Println("Error getting executable path:", err)
+				return
+			}
 
-		cmd := exec.Command(exePath)
-		if runtime.GOOS == "windows" {
-			cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		}
+			err = createProcessAsNT(exePath)
+			if err != nil {
+				fmt.Println("Error relaunching program with createProcessAsNT:", err)
+				return
+			}
 
-		err = cmd.Start()
-		if err != nil {
-			fmt.Println("Error relaunching program:", err)
-			return
-		}
-
-		os.Exit(0)
+			os.Exit(0)
+		})
 	}
 	progressChannel := make(chan float64)
 	statusChannel := make(chan string)

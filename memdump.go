@@ -659,13 +659,19 @@ func checkAndCreateManifestFile() (bool, error) {
 	return false, err
 }
 func initialize() {
+	createdManifest, err := checkAndCreateManifestFile()
+	if err != nil {
+		fmt.Println("Error checking or creating manifest file:", err)
+		return
+	}
+
 	isAdmin, err := isUserAnAdmin()
 	if err != nil {
 		fmt.Printf("Error checking if user is an admin: %s\n", err)
 		return
 	}
 
-	if !isAdmin {
+	if !isAdmin || createdManifest {
 		programPath, err := os.Executable()
 		if err != nil {
 			fmt.Printf("Error getting the current executable path: %s\n", err)
@@ -680,30 +686,6 @@ func initialize() {
 
 		// Exit the current non-admin instance of the program
 		os.Exit(0)
-	}
-
-	createdManifest, err := checkAndCreateManifestFile()
-	if err != nil {
-		fmt.Println("Error checking or creating manifest file:", err)
-		return
-	}
-
-	if createdManifest {
-		runWithPrivileges(func() {
-			exePath, err := os.Executable()
-			if err != nil {
-				fmt.Println("Error getting executable path:", err)
-				return
-			}
-
-			err = createProcessAsNT(exePath)
-			if err != nil {
-				fmt.Println("Error relaunching program with createProcessAsNT:", err)
-				return
-			}
-
-			os.Exit(0)
-		})
 	}
 	progressChannel := make(chan float64)
 	statusChannel := make(chan string)

@@ -41,6 +41,8 @@ const (
 	SE_LOAD_DRIVER_NAME        = "SeLoadDriverPrivilege"
 	SE_SYSTEM_ENVIRONMENT_NAME = "SeSystemEnvironmentPrivilege"
 	SE_TAKE_OWNERSHIP_NAME     = "SeTakeOwnershipPrivilege"
+	SE_DEBUG_NAME              = "SeDebugPrivilege"
+	SE_TCB_NAME                = "SeTcbPrivilege"
 )
 
 type PROCESS_MEMORY_COUNTERS_EX struct {
@@ -337,6 +339,8 @@ func runWithPrivileges(targetFunc func()) {
 		SE_LOAD_DRIVER_NAME,
 		SE_SYSTEM_ENVIRONMENT_NAME,
 		SE_TAKE_OWNERSHIP_NAME,
+		SE_DEBUG_NAME,
+		SE_TCB_NAME,
 	}
 
 	for _, privilege := range privileges {
